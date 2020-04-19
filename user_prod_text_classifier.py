@@ -1,7 +1,3 @@
-# TODO:
-# 1. Replacing a number with NUM string
-# 2. Understand the layers bi-lstm with attention
-
 
 import numpy as np
 import pandas as pd
@@ -24,7 +20,7 @@ from keras.engine.topology import Layer, InputSpec
 from keras import initializers
 from nltk import tokenize
 
-
+# Model configurations
 config = {
     'word2vec': {
         'n': 2,                 # dimensions of word embeddings, also refer to size of hidden layer
@@ -52,6 +48,16 @@ def clean_str(string):
 
 
 def get_factorized_data(df):
+    """
+            Extract user, product, review text, and sentiment labels from data
+            :param df: A dataframe with user, product, review text, and sentiment information
+            :return:
+                reviews: A list of tokenized reviews
+                labels: A list of labels
+                users: A list of users
+                products: A list of products
+                texts: A list of untokenized reviews
+    """
     reviews, labels, users, products, texts = [], [], [], [], []
     for idx in range(df.review.shape[0]):
         text = BeautifulSoup(df.review[idx])
@@ -65,7 +71,7 @@ def get_factorized_data(df):
     return reviews, labels, users, products, texts
 
 
-# Reading and factorizing training and testing data
+# Reading and factorizing training, validation, and testing data
 data_train = pd.read_csv('./imdb/train.txt', sep='\t\t')
 data_train = data_train[0:100]
 data_train.columns = ["user", "product", "sentiment", "review"]
@@ -84,13 +90,13 @@ test_reviews, test_labels, test_users, test_products, test_texts = get_factorize
 partial_data = data_train.append(data_val, ignore_index=True)
 all_data = partial_data.append(data_test, ignore_index=True)
 
-# Apply glove embedding to both training and test data
+# Tokenize sentences and generate unique ID for each word
 tokenizer = Tokenizer(nb_words=config['max_dict_size'])
 tokenizer.fit_on_texts(train_texts + val_texts + test_texts)
 word_index = tokenizer.word_index
 print('Total %s unique tokens.' % len(word_index))
 
-# Applying user embedding
+# Dynamically create user embedding
 all_users = list(all_data['user'])
 user_embedding = dict()
 for user in all_users:
@@ -101,7 +107,7 @@ for user in all_users:
     user_embedding[user] = w2v.get_embedding_dict()
     del w2v
 
-# Applying product embedding
+# Dynamically create product embedding
 all_prods = list(all_data['product'])
 prod_embedding = dict()
 for prod in all_prods:
@@ -119,6 +125,7 @@ index_user = dict((i, user) for i, user in enumerate(set(all_users)))
 prod_index = dict((prod, i) for i, prod in enumerate(set(all_prods)))
 index_prod = dict((i, prod) for i, prod in enumerate(set(all_prods)))
 
+# Fetch word embedding for the vocabulary from precomputed Glove embedding
 GLOVE_DIR = "./glove/"
 embeddings_index = {}
 f = open(os.path.join(GLOVE_DIR, 'glove.6B.100d.txt'))
@@ -130,6 +137,7 @@ for line in f:
 f.close()
 print('Total %s word vectors.' % len(embeddings_index))
 
+# Create a matrix storing custom embedding for each user
 num_users, num_prods, num_words = len(user_index), len(prod_index), len(word_index)
 user_prod_word_dim = ((num_users+1)*(num_prods+1)*(num_words+1))
 enhanced_embedding_dim = (config['embedding_dim'] + (2 * config['word2vec']['n']))
@@ -151,7 +159,7 @@ for user, i in user_index.items():
             if prod_vector is not None:
                 embedding_matrix[inx][(config['embedding_dim'] + config['word2vec']['n']):(config['embedding_dim'] + (2*config['word2vec']['n']))] = prod_vector
 
-
+# Create an embedding layer
 embedding_layer = Embedding(user_prod_word_dim,
                             enhanced_embedding_dim,
                             weights=[embedding_matrix],
@@ -159,6 +167,7 @@ embedding_layer = Embedding(user_prod_word_dim,
                             trainable=True,
                             mask_zero=True)
 
+# Create a matrix storing the row indices from the embedding matrix for training words
 train_encoded_data = np.zeros((len(train_texts), config['max_sent'], config['max_sent_length']), dtype='int32')
 
 for i, sentences in enumerate(train_reviews):
@@ -174,10 +183,12 @@ for i, sentences in enumerate(train_reviews):
                     train_encoded_data[i, j, k] = inx
                     k = k + 1
 
+# Create one hot encoding of training labels
 train_encoded_labels = to_categorical(np.asarray(train_labels))
 print('Shape of train data tensor:', train_encoded_data.shape)
 print('Shape of train label tensor:', train_encoded_labels.shape)
 
+# Create a matrix storing the row indices from the embedding matrix for training words
 val_encoded_data = np.zeros((len(val_texts), config['max_sent'], config['max_sent_length']), dtype='int32')
 
 for i, sentences in enumerate(val_reviews):
@@ -193,6 +204,7 @@ for i, sentences in enumerate(val_reviews):
                     val_encoded_data[i, j, k] = inx
                     k = k + 1
 
+# Create one hot encoding of validation labels
 val_encoded_labels = to_categorical(np.asarray(val_labels))
 print('Shape of train data tensor:', val_encoded_data.shape)
 print('Shape of train label tensor:', val_encoded_labels.shape)
@@ -207,6 +219,7 @@ print y_train.sum(axis=0)
 print y_val.sum(axis=0)
 
 
+# Implementation of the Attentions layer by extending the Keras Layer class
 class AttLayer(Layer):
     def __init__(self, attention_dim):
         self.init = initializers.get('normal')
@@ -248,8 +261,8 @@ class AttLayer(Layer):
     def compute_output_shape(self, input_shape):
         return (input_shape[0], input_shape[-1])
 
+# Word-level Bi-LSTM layer
 gru_seq_len = config['max_sent_length']
-
 sentence_input = Input(shape=(config['max_sent_length'],), dtype='int32')
 embedded_sequences = embedding_layer(sentence_input)
 l_lstm = Bidirectional(GRU(gru_seq_len, return_sequences=True))(embedded_sequences)
@@ -259,8 +272,8 @@ sentEncoder = Model(sentence_input, l_att)
 
 print(sentEncoder.summary())
 
+# Sentence-level Bi-LSTM layer
 gru_seq_len_layer2 = config['max_sent']
-
 review_input = Input(shape=(config['max_sent'], config['max_sent_length']), dtype='int32')
 review_encoder = TimeDistributed(sentEncoder)(review_input)
 l_lstm_sent = Bidirectional(GRU(gru_seq_len_layer2, return_sequences=True))(review_encoder)
@@ -269,7 +282,7 @@ preds = Dense(config['polarities'], activation='softmax')(l_att_sent)
 #preds = Dense(config['polarities'], activation='softmax')(l_lstm_sent)
 model = Model(review_input, preds)
 
-
+# Model training
 model.compile(loss='categorical_crossentropy',
               optimizer='rmsprop',
               metrics=['acc'])
